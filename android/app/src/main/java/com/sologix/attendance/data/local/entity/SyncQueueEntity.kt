@@ -37,6 +37,9 @@ data class SyncQueueEntity(
     @ColumnInfo(name = "last_attempt_at")
     val lastAttemptAt: Long? = null,
 
+    @ColumnInfo(name = "last_error")
+    val lastError: String? = null,
+
     @ColumnInfo(name = "created_at")
     val createdAt: Long = System.currentTimeMillis()
 )

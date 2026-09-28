@@ -14,6 +14,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -23,12 +24,12 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.sologix.attendance.MainActivity
-import com.sologix.attendance.R
 import com.sologix.attendance.data.local.AppDatabase
 import com.sologix.attendance.data.local.entity.GpsPointEntity
 import com.sologix.attendance.data.local.entity.OperationType
 import com.sologix.attendance.data.local.entity.SyncQueueEntity
 import com.sologix.attendance.data.local.entity.SyncState
+import com.sologix.attendance.location.LocationTrackingSessionStore
 import com.sologix.attendance.location.MockLocationDetector
 import com.sologix.attendance.sync.SyncManager
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +37,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 
 class LocationTrackingService : Service() {
@@ -43,11 +49,13 @@ class LocationTrackingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
+    private lateinit var sessionStore: LocationTrackingSessionStore
     private val mockDetector = MockLocationDetector()
 
     private var activeUserId: String? = null
 
     companion object {
+        private const val TAG = "LocationTrackingService"
         const val CHANNEL_ID = "sologix_shift_tracking_channel"
         const val NOTIFICATION_ID = 1001
 
@@ -77,12 +85,13 @@ class LocationTrackingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        sessionStore = LocationTrackingSessionStore(applicationContext)
         createNotificationChannel()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {
-                val userId = activeUserId ?: return
+                val userId = activeUserId ?: sessionStore.getUserId() ?: return
                 for (location in result.locations) {
                     val isMock = mockDetector.isMock(location)
                     recordTrackingPoint(userId, location.latitude, location.longitude, isMock)
@@ -92,29 +101,70 @@ class LocationTrackingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        if (intent == null) {
+            // START_STICKY restart with null intent: restore session from storage
+            if (sessionStore.isActive()) {
+                val persistedUserId = sessionStore.getUserId()
+                if (persistedUserId != null) {
+                    activeUserId = persistedUserId
+                    if (!startForegroundWithNotification()) {
+                        return START_NOT_STICKY
+                    }
+                    startLocationUpdates()
+                    return START_STICKY
+                }
+            }
+            // No persisted session, clean stop
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        when (intent.action) {
             ACTION_START -> {
-                activeUserId = intent.getStringExtra(EXTRA_USER_ID)
-                startForegroundWithNotification()
-                startLocationUpdates()
+                val userId = intent.getStringExtra(EXTRA_USER_ID) ?: sessionStore.getUserId()
+                if (userId != null) {
+                    activeUserId = userId
+                    sessionStore.saveSession(userId)
+                    if (!startForegroundWithNotification()) {
+                        return START_NOT_STICKY
+                    }
+                    startLocationUpdates()
+                } else {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
             }
             ACTION_STOP -> {
+                sessionStore.clearSession()
+                activeUserId = null
                 stopLocationUpdates()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+                return START_NOT_STICKY
             }
         }
         return START_STICKY
     }
 
-    private fun startForegroundWithNotification() {
-        val notification = buildPersistentNotification()
-        val foregroundType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-        } else {
-            0
+    private fun startForegroundWithNotification(): Boolean {
+        return try {
+            val notification = buildPersistentNotification()
+            val foregroundType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            } else {
+                0
+            }
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundType)
+            true
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException starting foreground service: ${e.message}", e)
+            stopSelf()
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected exception starting foreground service: ${e.message}", e)
+            stopSelf()
+            false
         }
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundType)
     }
 
     private fun buildPersistentNotification(): Notification {
@@ -149,7 +199,7 @@ class LocationTrackingService : Service() {
                 Looper.getMainLooper()
             )
         } catch (e: SecurityException) {
-            // Missing fine/coarse permission
+            Log.e(TAG, "SecurityException requesting location updates: ${e.message}", e)
         }
     }
 
@@ -175,17 +225,19 @@ class LocationTrackingService : Service() {
                 syncState = SyncState.PENDING
             )
 
-            val payloadJson = """
-                {
-                    "id": "$pointId",
-                    "userId": "$userId",
-                    "lat": $lat,
-                    "lng": $lng,
-                    "isMocked": $isMock,
-                    "recordedAt": $now,
-                    "operationId": "$operationId"
-                }
-            """.trimIndent()
+            val isoTimestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }.format(Date(now))
+
+            val payloadJson = JSONObject().apply {
+                put("id", pointId)
+                put("userId", userId)
+                put("lat", lat)
+                put("lng", lng)
+                put("isMocked", isMock)
+                put("recordedAt", isoTimestamp)
+                put("operationId", operationId)
+            }.toString()
 
             val queueItem = SyncQueueEntity(
                 operationId = operationId,

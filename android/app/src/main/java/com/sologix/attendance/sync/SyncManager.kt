@@ -31,10 +31,14 @@ object SyncManager {
      * Before anything else runs, queries for any sync_queue row stuck in IN_PROGRESS
      * from an interrupted run and resets it to FAILED so the next worker picks it up.
      */
+    suspend fun performCrashRecovery(db: AppDatabase): Int {
+        return db.syncQueueDao().resetInProgressToFailed()
+    }
+
     fun performCrashRecovery(context: Context) {
         CoroutineScope(Dispatchers.IO).launch {
             val db = AppDatabase.getInstance(context)
-            val resetCount = db.syncQueueDao().resetInProgressToFailed()
+            val resetCount = performCrashRecovery(db)
             if (resetCount > 0) {
                 // If any rows were recovered from stuck state, immediately trigger sync
                 triggerSync(context)

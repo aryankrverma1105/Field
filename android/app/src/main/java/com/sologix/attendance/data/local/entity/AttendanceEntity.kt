@@ -11,7 +11,7 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "attendance")
 data class AttendanceEntity(
     @PrimaryKey
-    val id: String, // Stable client-generated UUID
+    override val id: String, // Stable client-generated UUID
 
     @ColumnInfo(name = "user_id")
     val userId: String,
@@ -50,11 +50,11 @@ data class AttendanceEntity(
     val checkOutOperationId: String? = null,
 
     @ColumnInfo(name = "geofence_status")
-    val geofenceStatus: String = "INSIDE",
+    val geofenceStatus: String = "UNKNOWN",
 
     @ColumnInfo(name = "sync_state")
-    val syncState: SyncState = SyncState.PENDING,
+    override val syncState: SyncState = SyncState.PENDING,
 
     @ColumnInfo(name = "created_at")
     val createdAt: Long = System.currentTimeMillis()
-)
+) : SyncableEntity

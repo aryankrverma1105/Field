@@ -9,7 +9,7 @@ A production-grade attendance and field-workforce management system built with *
 ```
 +---------------------------------------------------------------------------------------+
 |                                    ANDROID CLIENT                                     |
-|  Compose UI (StateFlow) <─── Room Flow <─── Local SQLite Database (Local-first writes) |
+|  Compose UI (StateFlow) <─── Room Flow <─── Local SQLite Database (Local-first writes)|
 |                                                    │                                  |
 |                                                    ▼                                  |
 |                                           sync_queue (Room)                           |
@@ -24,7 +24,7 @@ A production-grade attendance and field-workforce management system built with *
                                                      ▼
 +---------------------------------------------------------------------------------------+
 |                                  GCP BACKEND (Ubuntu)                                 |
-|  Nginx (Reverse Proxy & TLS) ───► Express.js (Port 3000) ───► MySQL 8.0 (127.0.0.1)    |
+|  Nginx (Reverse Proxy & TLS) ───► Express.js (Port 3000) ───► MySQL 8.0 (127.0.0.1)   |
 |                                         │                                             |
 |                                         ▼ (Verify OTP token at login)                 |
 |                                Firebase Admin SDK                                     |
@@ -33,23 +33,27 @@ A production-grade attendance and field-workforce management system built with *
 
 ---
 
-## Key Guarantees & Features
+## Key Guarantees & Implementation Status
 
-1. **Local-First & Offline-First Sync:**
-   - Every mutation (check-in, check-out, GPS points, tasks, visits) is written locally to Room SQLite immediately with `syncState = PENDING`.
-   - The UI reflects mutations instantly and never blocks on network connectivity.
-2. **Stable Client-Generated IDs:**
-   - Client generates standard UUIDs (`VARCHAR(36)`) for every entity, ensuring identical identity across client and server.
-3. **Split Idempotency Keys:**
-   - Attendance check-in and check-out use separate idempotency keys (`check_in_operation_id` and `check_out_operation_id`) with MySQL `UNIQUE` constraints and conditional update checks, preventing duplicate writes on retries.
-4. **Crash-Safe Queue Recovery:**
-   - On app startup, any queued mutation stuck in `IN_PROGRESS` from an interrupted process or power-loss is automatically reset to `FAILED` and rescheduled.
-5. **Foreground Shift Tracking (Option A):**
-   - Active route tracking uses an Android Foreground Service declaring `foregroundServiceType="location"` with persistent user notification. Avoids Play Store background location review while ensuring uninterrupted GPS logging during shifts.
-6. **Hardware Mock Location Detection:**
-   - Dual-branch SDK-guarded mock detection (`Build.VERSION.SDK_INT >= Build.VERSION_CODES.S` checking `location.isMock` vs `location.isFromMockProvider`).
-7. **Hydration Merge Guard:**
-   - Local records awaiting sync are never overwritten by stale server snapshots during hydration or pull-to-refresh.
+| Subsystem / Guarantee | Status | Notes / Verification |
+| :--- | :--- | :--- |
+| **Split Idempotency Keys** (Check-In & Check-Out) | **Implemented and tested** | Split operation IDs on MySQL schema (`check_in_operation_id`, `check_out_operation_id`) and Room entities. Verified via real DB HTTP tests and Room unit tests. |
+| **Backend Express Server & JWT Middleware** | **Implemented and tested** | `src/server.js` running with HS256 JWT enforcement, 401 on missing/expired/`alg:none`, real HTTP endpoints. Verified via `node --test`. |
+| **Backend DB Security & Startup Env Validation** | **Implemented and tested** | Hardcoded passwords completely removed. Process exits with code 1 if required env vars are missing or JWT secret < 32 chars. |
+| **Stale Row Protection on Check-Out** | **Implemented and tested** | Targeted SQL `WHERE id=? AND user_id=? AND check_in_at IS NOT NULL AND check_out_operation_id IS NULL`. Prevents closing 2-day-old sessions. |
+| **Primary-Key Collision Protection on Check-In** | **Implemented and tested** | Returns HTTP 409 with existing record instead of `undefined` on PK conflict. |
+| **Server-Controlled Geofence Status** | **Implemented and tested** | Client geofence input is ignored; server stores `'UNKNOWN'` until Phase 2 site computation. |
+| **Hilt DI & Retrofit Network Pipeline** | **Implemented and tested** | `TokenStore` (`EncryptedSharedPreferences`), `AuthInterceptor`, `OkHttpClient`, `Retrofit`, and `ApiService`. Tested with `MockWebServer`. |
+| **Atomic Claim in SyncWorker** | **Implemented and tested** | Atomic `UPDATE sync_queue SET status='IN_PROGRESS' WHERE operation_id=? AND status IN ('PENDING','FAILED')` prevents dual-worker dispatch races. |
+| **Dead-Letter Queue & Status Classification** | **Implemented and tested** | `QueueStatus.DEAD` with `last_error` column. 400/404/409 or 5 consecutive failures transition to DEAD. Manual retry in Compose UI resets to PENDING. |
+| **Per-Entity Dispatch Ordering** | **Implemented and tested** | Check-out operations wait until prior operations for the same `entity_id` are SYNCED. Entity failure halts subsequent operations for that entity while allowing other entities to proceed. |
+| **Room Schema Export & Migration (1 → 2)** | **Implemented and tested** | `fallbackToDestructiveMigration()` removed. `exportSchema = true` with committed schema JSONs and real `Migration(1, 2)`. |
+| **Kotlin Hydration Merge Guard** | **Implemented and tested** | Shared `SyncableEntity` interface across attendance, tasks, customers, and visits. Protects un-synced/queued rows, refreshes clean SYNCED rows, inserts server-only, preserves local-only. |
+| **Foreground Shift Tracking Service (Option A)** | **Implemented and tested** | Foreground Service (`foregroundServiceType="location"`) with runtime permission flow, persistent notification, `START_STICKY` session persistence, and `SecurityException` catch. |
+| **Mock Location Detector** | **Implemented and tested** | Hardware mock detection with API-level branching tested in `MockLocationDetectorTest`. |
+| **Firebase Phone Auth Flow & UI** | **Not started** | Phase 2 scope. Backend tests sign tokens directly with `JWT_SECRET`. |
+| **CameraX Selfie Capture UI** | **Not started** | Phase 2 scope. |
+| **Server-Side Geofence Polygon Evaluation** | **Not started** | Phase 2 scope. |
 
 ---
 

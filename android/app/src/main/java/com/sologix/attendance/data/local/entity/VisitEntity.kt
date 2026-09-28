@@ -10,7 +10,7 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "visits")
 data class VisitEntity(
     @PrimaryKey
-    val id: String, // Stable client-generated UUID
+    override val id: String, // Stable client-generated UUID
 
     @ColumnInfo(name = "customer_id")
     val customerId: String,
@@ -44,8 +44,8 @@ data class VisitEntity(
     val followUpDate: String? = null,
 
     @ColumnInfo(name = "sync_state")
-    val syncState: SyncState = SyncState.PENDING,
+    override val syncState: SyncState = SyncState.PENDING,
 
     @ColumnInfo(name = "created_at")
     val createdAt: Long = System.currentTimeMillis()
-)
+) : SyncableEntity

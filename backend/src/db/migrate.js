@@ -15,7 +15,7 @@ async function migrate() {
         name VARCHAR(255) NOT NULL,
         daily_wage DECIMAL(10,2) DEFAULT 0.00,
         status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
@@ -27,7 +27,7 @@ async function migrate() {
         lat DOUBLE NOT NULL,
         lng DOUBLE NOT NULL,
         geofence_radius_m DOUBLE NOT NULL DEFAULT 100.0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
@@ -41,29 +41,39 @@ async function migrate() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
-    // 4. Attendance table with FIX 1: Split check_in_operation_id and check_out_operation_id
+    // 4. Attendance table with Split Keys and DATETIME(3)
     await conn.query(`
       CREATE TABLE IF NOT EXISTS attendance (
         id VARCHAR(36) PRIMARY KEY,
         user_id VARCHAR(36) NOT NULL,
-        check_in_at TIMESTAMP NULL,
+        check_in_at DATETIME(3) NULL,
         check_in_lat DOUBLE NULL,
         check_in_lng DOUBLE NULL,
         check_in_photo_path VARCHAR(512) NULL,
         check_in_is_mocked BOOLEAN DEFAULT FALSE,
         check_in_operation_id VARCHAR(64) NULL,
-        check_out_at TIMESTAMP NULL,
+        check_out_at DATETIME(3) NULL,
         check_out_lat DOUBLE NULL,
         check_out_lng DOUBLE NULL,
         check_out_photo_path VARCHAR(512) NULL,
         check_out_operation_id VARCHAR(64) NULL,
         geofence_status VARCHAR(32) DEFAULT 'UNKNOWN',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         UNIQUE KEY uq_user_checkin_op (user_id, check_in_operation_id),
         UNIQUE KEY uq_user_checkout_op (user_id, check_out_operation_id),
         INDEX idx_user_attendance (user_id, check_in_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+
+    // Alter existing table columns to DATETIME(3) if created previously with TIMESTAMP
+    try {
+      await conn.query(`
+        ALTER TABLE attendance
+        MODIFY check_in_at DATETIME(3) NULL,
+        MODIFY check_out_at DATETIME(3) NULL,
+        MODIFY created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3);
+      `);
+    } catch (_) {}
 
     // 5. GPS Points table
     await conn.query(`
@@ -73,12 +83,20 @@ async function migrate() {
         lat DOUBLE NOT NULL,
         lng DOUBLE NOT NULL,
         is_mocked BOOLEAN DEFAULT FALSE,
-        recorded_at TIMESTAMP NOT NULL,
+        recorded_at DATETIME(3) NOT NULL,
         operation_id VARCHAR(64) NOT NULL,
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         UNIQUE KEY uq_user_gps_op (user_id, operation_id),
         INDEX idx_user_recorded (user_id, recorded_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+
+    try {
+      await conn.query(`
+        ALTER TABLE gps_points
+        MODIFY recorded_at DATETIME(3) NOT NULL;
+      `);
+    } catch (_) {}
 
     // 6. Tasks table
     await conn.query(`
@@ -92,8 +110,8 @@ async function migrate() {
         priority VARCHAR(32) DEFAULT 'MEDIUM',
         status VARCHAR(32) DEFAULT 'PENDING',
         operation_id VARCHAR(64) NULL,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         INDEX idx_assigned_to (assigned_to, scheduled_date)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
@@ -107,32 +125,42 @@ async function migrate() {
         address TEXT,
         created_by VARCHAR(36) NOT NULL,
         operation_id VARCHAR(64) NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         INDEX idx_created_by (created_by)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
-    // 8. Visits table with split keys for check-in and complete
+    // 8. Visits table
     await conn.query(`
       CREATE TABLE IF NOT EXISTS visits (
         id VARCHAR(36) PRIMARY KEY,
         customer_id VARCHAR(36) NOT NULL,
         assigned_to VARCHAR(36) NOT NULL,
-        scheduled_for TIMESTAMP NULL,
+        scheduled_for DATETIME(3) NULL,
         status VARCHAR(32) DEFAULT 'SCHEDULED',
-        check_in_at TIMESTAMP NULL,
+        check_in_at DATETIME(3) NULL,
         check_in_operation_id VARCHAR(64) NULL,
-        check_out_at TIMESTAMP NULL,
+        check_out_at DATETIME(3) NULL,
         complete_operation_id VARCHAR(64) NULL,
         meeting_outcome TEXT,
         notes TEXT,
         follow_up_date DATE NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         UNIQUE KEY uq_visit_checkin_op (assigned_to, check_in_operation_id),
         UNIQUE KEY uq_visit_complete_op (assigned_to, complete_operation_id),
         INDEX idx_visit_assigned (assigned_to, scheduled_for)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+
+    try {
+      await conn.query(`
+        ALTER TABLE visits
+        MODIFY scheduled_for DATETIME(3) NULL,
+        MODIFY check_in_at DATETIME(3) NULL,
+        MODIFY check_out_at DATETIME(3) NULL,
+        MODIFY created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3);
+      `);
+    } catch (_) {}
 
     // 9. Chat Messages table
     await conn.query(`
@@ -141,7 +169,7 @@ async function migrate() {
         channel_id VARCHAR(36) NOT NULL,
         sender_id VARCHAR(36) NOT NULL,
         body TEXT NOT NULL,
-        sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        sent_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         operation_id VARCHAR(64) NOT NULL,
         UNIQUE KEY uq_chat_op (sender_id, operation_id),
         INDEX idx_channel_sent (channel_id, sent_at)
@@ -159,7 +187,7 @@ async function migrate() {
         status VARCHAR(32) DEFAULT 'PENDING',
         reviewed_by VARCHAR(36),
         operation_id VARCHAR(64) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         UNIQUE KEY uq_expense_op (user_id, operation_id),
         INDEX idx_expense_user (user_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -171,8 +199,8 @@ async function migrate() {
         id VARCHAR(36) PRIMARY KEY,
         user_id VARCHAR(36) NOT NULL,
         body TEXT NOT NULL,
-        read_at TIMESTAMP NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        read_at DATETIME(3) NULL,
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         INDEX idx_notif_user (user_id, read_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
@@ -186,7 +214,7 @@ async function migrate() {
         target_type VARCHAR(64) NOT NULL,
         target_id VARCHAR(36) NOT NULL,
         metadata_json TEXT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
         INDEX idx_audit_actor (actor_id, created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);

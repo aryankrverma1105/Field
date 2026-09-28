@@ -25,7 +25,8 @@ enum class QueueStatus {
     PENDING,
     IN_PROGRESS,
     SYNCED,
-    FAILED
+    FAILED,
+    DEAD
 }
 
 enum class SyncState {

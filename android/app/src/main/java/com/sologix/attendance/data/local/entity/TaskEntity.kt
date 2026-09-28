@@ -7,7 +7,7 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "tasks")
 data class TaskEntity(
     @PrimaryKey
-    val id: String, // Stable client-generated UUID
+    override val id: String, // Stable client-generated UUID
 
     @ColumnInfo(name = "assigned_to")
     val assignedTo: String,
@@ -28,8 +28,8 @@ data class TaskEntity(
     val operationId: String?,
 
     @ColumnInfo(name = "sync_state")
-    val syncState: SyncState = SyncState.PENDING,
+    override val syncState: SyncState = SyncState.PENDING,
 
     @ColumnInfo(name = "updated_at")
     val updatedAt: Long = System.currentTimeMillis()
-)
+) : SyncableEntity

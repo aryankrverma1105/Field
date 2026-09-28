@@ -1,25 +1,27 @@
 package com.sologix.attendance.sync
 
 import android.content.Context
+import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.sologix.attendance.data.local.AppDatabase
 import com.sologix.attendance.data.local.entity.OperationType
 import com.sologix.attendance.data.local.entity.SyncState
+import com.sologix.attendance.data.remote.ApiService
+import dagger.assisted.Assisted
+import dagger.assisted.AssistedInject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
 
-/**
- * Phase 1 Item 5: A Single CoroutineWorker handling offline sync.
- *
- * Reads PENDING/FAILED items from sync_queue, invokes matching network calls,
- * and updates Room entities. Failures increment attempt_count and trigger
- * WorkManager's exponential backoff, dead-lettering to FAILED after max attempts.
- */
-class SyncWorker(
-    appContext: Context,
-    workerParams: WorkerParameters
+@HiltWorker
+class SyncWorker @AssistedInject constructor(
+    @Assisted appContext: Context,
+    @Assisted workerParams: WorkerParameters,
+    private val db: AppDatabase,
+    private val apiService: ApiService
 ) : CoroutineWorker(appContext, workerParams) {
 
     companion object {
@@ -29,38 +31,78 @@ class SyncWorker(
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        val db = AppDatabase.getInstance(applicationContext)
         val syncDao = db.syncQueueDao()
 
-        // 1. Fetch pending or failed items in sequence
-        val queueItems = syncDao.getPendingOrFailed(limit = 20)
+        val queueItems = syncDao.getPendingOrFailed(limit = 50)
         if (queueItems.isEmpty()) {
             return@withContext Result.success()
         }
 
         var anyFailed = false
+        val failedEntityIds = mutableSetOf<String>()
 
         for (item in queueItems) {
-            try {
-                // Mark IN_PROGRESS
-                syncDao.markInProgress(item.operationId)
+            // Per-entity ordering: check if this entity already failed in this run
+            if (failedEntityIds.contains(item.entityId)) {
+                continue
+            }
 
-                // Dispatch to network
-                val success = dispatchMutation(item.operationType, item.payloadJson, item.operationId)
+            // Per-entity ordering: check if earlier unsynced operation exists in DB for this entity
+            val hasEarlier = syncDao.hasEarlierUnsyncedOperations(item.entityId, item.createdAt)
+            if (hasEarlier) {
+                // Check-out or later operation must wait for its earlier operation (e.g. check-in)
+                continue
+            }
 
-                if (success) {
-                    // Update sync_queue to SYNCED
+            // Atomic claim: only proceed if row was successfully updated from PENDING/FAILED to IN_PROGRESS
+            val claimed = syncDao.markInProgressAtomic(item.operationId)
+            if (claimed != 1) {
+                // Row claimed by another worker or already completed
+                continue
+            }
+
+            // Dispatch mutation to network
+            val result = dispatchMutation(item.operationType, item.payloadJson)
+
+            when (result) {
+                is DispatchResult.Success -> {
                     syncDao.markSynced(item.operationId)
-
-                    // Update parent entity syncState to SYNCED in Room
                     updateEntitySyncState(db, item.entityType, item.entityId, SyncState.SYNCED)
-                } else {
-                    anyFailed = true
-                    handleFailure(syncDao, db, item.operationId, item.entityType, item.entityId, item.attemptCount)
                 }
-            } catch (e: Exception) {
-                anyFailed = true
-                handleFailure(syncDao, db, item.operationId, item.entityType, item.entityId, item.attemptCount)
+
+                is DispatchResult.Transient -> {
+                    anyFailed = true
+                    failedEntityIds.add(item.entityId)
+                    val nextAttempt = item.attemptCount + 1
+                    if (nextAttempt >= MAX_ATTEMPT_COUNT) {
+                        syncDao.markDead(item.operationId, "Max retry limit ($MAX_ATTEMPT_COUNT) reached: ${result.reason}")
+                        updateEntitySyncState(db, item.entityType, item.entityId, SyncState.FAILED)
+                    } else {
+                        syncDao.recordFailure(item.operationId, result.reason)
+                        updateEntitySyncState(db, item.entityType, item.entityId, SyncState.FAILED)
+                    }
+                }
+
+                is DispatchResult.Permanent -> {
+                    anyFailed = true
+                    failedEntityIds.add(item.entityId)
+                    syncDao.markDead(item.operationId, result.reason)
+                    updateEntitySyncState(db, item.entityType, item.entityId, SyncState.FAILED)
+                }
+
+                is DispatchResult.AuthRequired -> {
+                    // 401 -> AuthRequired (do not increment attempt_count; stop the run)
+                    syncDao.resetInProgressWithoutIncrement(item.operationId)
+                    return@withContext Result.retry()
+                }
+
+                is DispatchResult.Unsupported -> {
+                    // Any OperationType without a real endpoint yet -> Unsupported.
+                    // It must never be marked SYNCED. It stays visible and un-synced until its endpoint exists.
+                    // Do not increment attempt_count, reset status back to PENDING.
+                    syncDao.resetInProgressToPending(item.operationId)
+                    failedEntityIds.add(item.entityId)
+                }
             }
         }
 
@@ -68,21 +110,6 @@ class SyncWorker(
             Result.retry()
         } else {
             Result.success()
-        }
-    }
-
-    private suspend fun handleFailure(
-        syncDao: com.sologix.attendance.data.local.dao.SyncQueueDao,
-        db: AppDatabase,
-        operationId: String,
-        entityType: String,
-        entityId: String,
-        currentAttempts: Int
-    ) {
-        syncDao.recordFailure(operationId, System.currentTimeMillis())
-        if (currentAttempts + 1 >= MAX_ATTEMPT_COUNT) {
-            // Dead-letter to manual retry UI
-            updateEntitySyncState(db, entityType, entityId, SyncState.FAILED)
         }
     }
 
@@ -101,16 +128,36 @@ class SyncWorker(
         }
     }
 
-    /**
-     * Dispatches mutation payload to the backend REST API.
-     */
-    private suspend fun dispatchMutation(
+    suspend fun dispatchMutation(
         operationType: OperationType,
-        payloadJson: String,
-        operationId: String
-    ): Boolean {
-        // Mock / Retrofit dispatcher
-        // In full integration this invokes ApiService.postSync(operationId, body)
-        return true
+        payloadJson: String
+    ): DispatchResult {
+        val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+        val requestBody = payloadJson.toRequestBody(jsonMediaType)
+
+        return try {
+            val response = when (operationType) {
+                OperationType.CHECK_IN -> apiService.checkIn(requestBody)
+                OperationType.CHECK_OUT -> apiService.checkOut(requestBody)
+                OperationType.GPS_POINT -> apiService.sendGpsPoint(requestBody)
+                else -> return DispatchResult.Unsupported("OperationType $operationType has no endpoint yet")
+            }
+
+            classifyResponse(response.code(), response.errorBody()?.string())
+        } catch (e: IOException) {
+            DispatchResult.Transient("Network I/O error: ${e.message}")
+        } catch (e: Exception) {
+            DispatchResult.Permanent("Unexpected error: ${e.message}")
+        }
+    }
+
+    private fun classifyResponse(code: Int, errorBody: String?): DispatchResult {
+        return when {
+            code in 200..299 -> DispatchResult.Success
+            code == 401 -> DispatchResult.AuthRequired
+            code == 408 || code == 429 || code in 500..599 -> DispatchResult.Transient("HTTP $code: ${errorBody ?: ""}")
+            code in 400..499 -> DispatchResult.Permanent("HTTP $code: ${errorBody ?: ""}")
+            else -> DispatchResult.Permanent("Unexpected HTTP status $code")
+        }
     }
 }

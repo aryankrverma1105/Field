@@ -1,20 +1,25 @@
 package com.sologix.attendance
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.sologix.attendance.data.local.entity.QueueStatus
 import com.sologix.attendance.data.local.entity.SyncQueueEntity
@@ -31,11 +36,50 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    SyncStatusScreen()
+                    PermissionGuard {
+                        SyncStatusScreen()
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+fun PermissionGuard(content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    var hasLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        hasLocationPermission = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
+    }
+
+    LaunchedEffect(Unit) {
+        val permissionsToRequest = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        val missing = permissionsToRequest.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    content()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,6 +87,7 @@ class MainActivity : ComponentActivity() {
 fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
     val queueItems by viewModel.queueItems.collectAsState()
     val pendingCount by viewModel.pendingCount.collectAsState()
+    val latestAttendance by viewModel.latestAttendance.collectAsState()
 
     Scaffold(
         topBar = {
@@ -73,7 +118,7 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = if (pendingCount == 0) "All Systems Synced" else "$pendingCount Items Awaiting Sync",
                             style = MaterialTheme.typography.titleMedium
@@ -85,6 +130,41 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
                     }
                     Button(onClick = { viewModel.triggerManualRetry() }) {
                         Text("Sync Now")
+                    }
+                }
+            }
+
+            if (BuildConfig.DEBUG) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "Debug Simulation Controls",
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { viewModel.simulateCheckIn() },
+                                modifier = Modifier.weight(1f),
+                                enabled = latestAttendance == null || latestAttendance?.checkOutAt != null
+                            ) {
+                                Text("Check-In")
+                            }
+                            Button(
+                                onClick = { viewModel.simulateCheckOut() },
+                                modifier = Modifier.weight(1f),
+                                enabled = latestAttendance != null && latestAttendance?.checkOutAt == null
+                            ) {
+                                Text("Check-Out")
+                            }
+                        }
                     }
                 }
             }
@@ -105,7 +185,10 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(queueItems, key = { it.operationId }) { item ->
-                        QueueItemRow(item)
+                        QueueItemRow(
+                            item = item,
+                            onRetry = { viewModel.retryItem(item.operationId) }
+                        )
                     }
                 }
             }
@@ -114,19 +197,21 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
 }
 
 @Composable
-fun QueueItemRow(item: SyncQueueEntity) {
+fun QueueItemRow(item: SyncQueueEntity, onRetry: () -> Unit) {
     val statusColor = when (item.status) {
         QueueStatus.SYNCED -> Color(0xFF2E7D32)
         QueueStatus.PENDING -> Color(0xFFF57C00)
         QueueStatus.IN_PROGRESS -> Color(0xFF1976D2)
         QueueStatus.FAILED -> Color(0xFFD32F2F)
+        QueueStatus.DEAD -> Color(0xFF616161)
     }
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = "${item.operationType} (${item.entityType})",
@@ -150,6 +235,24 @@ fun QueueItemRow(item: SyncQueueEntity) {
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.Red
                 )
+            }
+            if (!item.lastError.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Error: ${item.lastError}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            if (item.status == QueueStatus.FAILED || item.status == QueueStatus.DEAD) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Button(
+                    onClick = onRetry,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("Retry")
+                }
             }
         }
     }
