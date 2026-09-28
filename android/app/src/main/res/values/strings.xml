@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Sologix Attendance</string>
+    <string name="channel_location_tracking">Active Shift Location Tracking</string>
+    <string name="channel_location_description">Notifies employee that their route is actively recorded during their shift.</string>
+</resources>
