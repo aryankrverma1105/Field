@@ -49,6 +49,44 @@ class CrashRecoveryAndRepositoryTest {
 
         override suspend fun getAttendanceHistory(since: String?): Response<List<AttendanceHistoryDto>> =
             historyResponse
+
+        override suspend fun login(request: com.sologix.attendance.data.remote.LoginRequest): Response<com.sologix.attendance.data.remote.LoginResponse> =
+            Response.success(
+                com.sologix.attendance.data.remote.LoginResponse(
+                    "fake-jwt",
+                    com.sologix.attendance.data.remote.UserDto("u1", "Test", "+919999999999", "employee", "ACTIVE")
+                )
+            )
+
+        override suspend fun createTask(body: RequestBody): Response<ResponseBody> =
+            Response.success(ResponseBody.create(null, "{}"))
+
+        override suspend fun getTaskHistory(since: String?): Response<List<com.sologix.attendance.data.remote.TaskHistoryDto>> =
+            Response.success(emptyList())
+
+        override suspend fun createCustomer(body: RequestBody): Response<ResponseBody> =
+            Response.success(ResponseBody.create(null, "{}"))
+
+        override suspend fun getCustomerHistory(since: String?): Response<List<com.sologix.attendance.data.remote.CustomerHistoryDto>> =
+            Response.success(emptyList())
+
+        override suspend fun visitCheckIn(body: RequestBody): Response<ResponseBody> =
+            Response.success(ResponseBody.create(null, "{}"))
+
+        override suspend fun visitComplete(body: RequestBody): Response<ResponseBody> =
+            Response.success(ResponseBody.create(null, "{}"))
+
+        override suspend fun visitNotes(body: RequestBody): Response<ResponseBody> =
+            Response.success(ResponseBody.create(null, "{}"))
+
+        override suspend fun getVisitHistory(since: String?): Response<List<com.sologix.attendance.data.remote.VisitHistoryDto>> =
+            Response.success(emptyList())
+
+        override suspend fun createExpense(body: RequestBody): Response<ResponseBody> =
+            Response.success(ResponseBody.create(null, "{}"))
+
+        override suspend fun getExpenseHistory(since: String?): Response<List<com.sologix.attendance.data.remote.ExpenseHistoryDto>> =
+            Response.success(emptyList())
     }
 
     @Before

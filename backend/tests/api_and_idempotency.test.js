@@ -11,6 +11,7 @@ const pool = require('../src/db/pool');
 const env = require('../src/config/env');
 const migrate = require('../src/db/migrate');
 const attendanceService = require('../src/services/attendanceService');
+const { AuthService } = require('../src/services/authService');
 
 describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
   let server;
@@ -567,12 +568,19 @@ describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
 
   // --- Part B.1: Firebase Phone Auth exchange -> App JWT ---
   test('POST /api/auth/login with valid Firebase token issues application JWT for active user', async () => {
-    // testUserId was seeded with phone testPhone
+    const fakeVerifier = async (token) => {
+      if (token === 'real-looking-firebase-id-token-valid-abc') {
+        return { uid: `fb_uid_${testUserId}`, phone_number: testPhone };
+      }
+      throw new Error('Unexpected token');
+    };
+    app.set('authService', new AuthService(fakeVerifier));
+
     const res = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        idToken: `test-fb-token:fb_uid_${testUserId}:${testPhone}`
+        idToken: 'real-looking-firebase-id-token-valid-abc'
       })
     });
     assert.equal(res.status, 200);
@@ -588,11 +596,18 @@ describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
   });
 
   test('POST /api/auth/login with invalid or expired Firebase token returns 401', async () => {
+    const fakeExpiredVerifier = async () => {
+      const err = new Error('Firebase ID token has expired');
+      err.statusCode = 401;
+      throw err;
+    };
+    app.set('authService', new AuthService(fakeExpiredVerifier));
+
     const res = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        idToken: 'test-fb-token:expired:invalid'
+        idToken: 'real-looking-firebase-id-token-expired'
       })
     });
     assert.equal(res.status, 401);
@@ -602,17 +617,23 @@ describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
 
   test('POST /api/auth/login with valid token but inactive user returns 403', async () => {
     const inactiveUserId = crypto.randomUUID();
-    const inactivePhone = '+918888888888';
+    const inactivePhone = `+91${Math.floor(1000000000 + Math.random() * 9000000000)}`;
     await pool.execute(
       `INSERT INTO users (id, phone_e164, name, role, status) VALUES (?, ?, ?, ?, ?)`,
       [inactiveUserId, inactivePhone, 'Inactive Employee', 'employee', 'INACTIVE']
     );
 
+    const fakeInactiveVerifier = async () => ({
+      uid: `fb_${inactiveUserId}`,
+      phone_number: inactivePhone
+    });
+    app.set('authService', new AuthService(fakeInactiveVerifier));
+
     const res = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        idToken: `test-fb-token:fb_${inactiveUserId}:${inactivePhone}`
+        idToken: 'real-looking-firebase-id-token-for-inactive-user'
       })
     });
     assert.equal(res.status, 403);
@@ -625,13 +646,19 @@ describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
 
   test('POST /api/auth/login with unknown Firebase UID returns 403 and never creates an account implicitly', async () => {
     const unknownUid = `unknown_uid_${crypto.randomUUID()}`;
-    const unknownPhone = '+917777777777';
+    const unknownPhone = `+91${Math.floor(1000000000 + Math.random() * 9000000000)}`;
+
+    const fakeUnknownVerifier = async () => ({
+      uid: unknownUid,
+      phone_number: unknownPhone
+    });
+    app.set('authService', new AuthService(fakeUnknownVerifier));
 
     const res = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        idToken: `test-fb-token:${unknownUid}:${unknownPhone}`
+        idToken: 'real-looking-firebase-id-token-for-unknown-uid'
       })
     });
     assert.equal(res.status, 403);

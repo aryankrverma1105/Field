@@ -25,8 +25,21 @@ if (admin.apps.length === 0) {
 
 class AuthService {
   /**
-   * Overridable token verifier (allows mocking in test environments)
+   * Accepts a tokenVerifier function as a constructor dependency.
+   * Production defaults to real Firebase Admin SDK verifyIdToken.
+   * Unit tests inject a fake verifier with zero magic strings in request fields.
    */
+  constructor(tokenVerifier = null) {
+    this.tokenVerifier = tokenVerifier || (async (idToken) => {
+      if (!firebaseApp) {
+        const err = new Error('Firebase Admin SDK is not configured');
+        err.statusCode = 500;
+        throw err;
+      }
+      return await admin.auth().verifyIdToken(idToken);
+    });
+  }
+
   async verifyIdToken(idToken) {
     if (!idToken || typeof idToken !== 'string') {
       const err = new Error('Invalid or missing idToken');
@@ -34,29 +47,10 @@ class AuthService {
       throw err;
     }
 
-    // Support test mock tokens in non-production environments
-    if (process.env.NODE_ENV !== 'production' && idToken.startsWith('test-fb-token:')) {
-      const parts = idToken.split(':');
-      if (parts[1] === 'expired' || parts[1] === 'invalid') {
-        const err = new Error('Firebase ID token has expired or is invalid');
-        err.statusCode = 401;
-        throw err;
-      }
-      return {
-        uid: parts[1] || 'mock_uid',
-        phone_number: parts[2] || '+919999999999'
-      };
-    }
-
-    if (!firebaseApp) {
-      const err = new Error('Firebase Admin SDK is not configured');
-      err.statusCode = 500;
-      throw err;
-    }
-
     try {
-      return await admin.auth().verifyIdToken(idToken);
+      return await this.tokenVerifier(idToken);
     } catch (err) {
+      if (err.statusCode) throw err;
       const authErr = new Error('Invalid or expired Firebase ID token');
       authErr.statusCode = 401;
       throw authErr;
@@ -121,4 +115,7 @@ class AuthService {
   }
 }
 
-module.exports = new AuthService();
+const defaultAuthService = new AuthService();
+defaultAuthService.AuthService = AuthService;
+
+module.exports = defaultAuthService;

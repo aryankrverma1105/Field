@@ -23,4 +23,38 @@ interface ApiService {
 
     @POST("api/auth/login")
     suspend fun login(@Body request: LoginRequest): Response<LoginResponse>
+
+    // Tasks
+    @POST("api/tasks")
+    suspend fun createTask(@Body body: RequestBody): Response<ResponseBody>
+
+    @GET("api/tasks/history")
+    suspend fun getTaskHistory(@Query("since") since: String? = null): Response<List<TaskHistoryDto>>
+
+    // Customers
+    @POST("api/customers")
+    suspend fun createCustomer(@Body body: RequestBody): Response<ResponseBody>
+
+    @GET("api/customers/history")
+    suspend fun getCustomerHistory(@Query("since") since: String? = null): Response<List<CustomerHistoryDto>>
+
+    // Visits
+    @POST("api/visits/check-in")
+    suspend fun visitCheckIn(@Body body: RequestBody): Response<ResponseBody>
+
+    @POST("api/visits/complete")
+    suspend fun visitComplete(@Body body: RequestBody): Response<ResponseBody>
+
+    @POST("api/visits/notes")
+    suspend fun visitNotes(@Body body: RequestBody): Response<ResponseBody>
+
+    @GET("api/visits/history")
+    suspend fun getVisitHistory(@Query("since") since: String? = null): Response<List<VisitHistoryDto>>
+
+    // Expenses
+    @POST("api/expenses")
+    suspend fun createExpense(@Body body: RequestBody): Response<ResponseBody>
+
+    @GET("api/expenses/history")
+    suspend fun getExpenseHistory(@Query("since") since: String? = null): Response<List<ExpenseHistoryDto>>
 }

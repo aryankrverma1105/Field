@@ -23,7 +23,8 @@ app.get('/health', (req, res) => {
 app.post('/api/auth/login', async (req, res, next) => {
   try {
     const { idToken } = req.body;
-    const result = await authService.loginWithFirebaseToken(idToken);
+    const activeAuthService = req.app.get('authService') || authService;
+    const result = await activeAuthService.loginWithFirebaseToken(idToken);
     res.status(200).json(result);
   } catch (err) {
     next(err);

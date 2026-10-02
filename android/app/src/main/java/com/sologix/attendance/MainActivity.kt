@@ -21,8 +21,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.sologix.attendance.data.local.entity.AttendanceEntity
+import com.sologix.attendance.data.local.entity.CustomerEntity
+import com.sologix.attendance.data.local.entity.ExpenseEntity
 import com.sologix.attendance.data.local.entity.QueueStatus
 import com.sologix.attendance.data.local.entity.SyncQueueEntity
+import com.sologix.attendance.data.local.entity.SyncState
+import com.sologix.attendance.data.local.entity.TaskEntity
+import com.sologix.attendance.data.local.entity.VisitEntity
 import com.sologix.attendance.ui.SyncViewModel
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -37,7 +43,7 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     PermissionGuard {
-                        SyncStatusScreen()
+                        MainScreen()
                     }
                 }
             }
@@ -84,21 +90,52 @@ fun PermissionGuard(content: @Composable () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
+fun MainScreen(viewModel: SyncViewModel = viewModel()) {
+    var selectedTab by remember { mutableStateOf(0) }
+    val tabTitles = listOf("Queue & Attendance", "Tasks", "Customers", "Visits", "Expenses")
+
     val queueItems by viewModel.queueItems.collectAsState()
     val pendingCount by viewModel.pendingCount.collectAsState()
     val latestAttendance by viewModel.latestAttendance.collectAsState()
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val uiError by viewModel.uiError.collectAsState()
 
+    val tasks by viewModel.tasks.collectAsState()
+    val customers by viewModel.customers.collectAsState()
+    val visits by viewModel.visits.collectAsState()
+    val expenses by viewModel.expenses.collectAsState()
+
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Sologix Offline Sync Foundation") },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
+            Column {
+                TopAppBar(
+                    title = { Text("Sologix Field & Attendance") },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    ),
+                    actions = {
+                        TextButton(onClick = { viewModel.refreshHydration() }, enabled = !isRefreshing) {
+                            if (isRefreshing) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text("Hydrate")
+                            }
+                        }
+                        IconButton(onClick = { viewModel.triggerManualRetry() }) {
+                            Text("Sync")
+                        }
+                    }
                 )
-            )
+                TabRow(selectedTabIndex = selectedTab) {
+                    tabTitles.forEachIndexed { index, title ->
+                        Tab(
+                            selected = selectedTab == index,
+                            onClick = { selectedTab = index },
+                            text = { Text(title) }
+                        )
+                    }
+                }
+            }
         }
     ) { padding ->
         Column(
@@ -107,6 +144,7 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
                 .padding(padding)
                 .padding(16.dp)
         ) {
+            // Global Sync Status Banner
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -116,37 +154,16 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(12.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (pendingCount == 0) "All Systems Synced" else "$pendingCount Items Awaiting Sync",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        Text(
-                            text = "StateFlow automatically updated via Room Flow",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { viewModel.refreshHydration() },
-                            enabled = !isRefreshing
-                        ) {
-                            if (isRefreshing) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp
-                                )
-                            } else {
-                                Text("Hydrate")
-                            }
-                        }
-                        Button(onClick = { viewModel.triggerManualRetry() }) {
-                            Text("Sync Now")
-                        }
+                    Text(
+                        text = if (pendingCount == 0) "All Queues Synced" else "$pendingCount Mutations Queued",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Button(onClick = { viewModel.triggerManualRetry() }) {
+                        Text("Sync Now")
                     }
                 }
             }
@@ -177,65 +194,397 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
                 }
             }
 
-            if (BuildConfig.DEBUG) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Card(
+            Spacer(modifier = Modifier.height(12.dp))
+
+            when (selectedTab) {
+                0 -> QueueAndAttendanceView(
+                    latestAttendance = latestAttendance,
+                    queueItems = queueItems,
+                    onCheckIn = { viewModel.simulateCheckIn() },
+                    onCheckOut = { viewModel.simulateCheckOut() },
+                    onRetryItem = { viewModel.retryItem(it) }
+                )
+                1 -> TasksView(
+                    tasks = tasks,
+                    onCreateTask = { title, desc, prio -> viewModel.createTask(title, desc, priority = prio) }
+                )
+                2 -> CustomersView(
+                    customers = customers,
+                    onCreateCustomer = { name, phone, addr -> viewModel.createCustomer(name, phone, addr) }
+                )
+                3 -> VisitsView(
+                    visits = visits,
+                    customers = customers,
+                    onCheckInVisit = { custId -> viewModel.checkInVisit(custId) },
+                    onCompleteVisit = { vId, outcome -> viewModel.completeVisit(vId, outcome) }
+                )
+                4 -> ExpensesView(
+                    expenses = expenses,
+                    onCreateExpense = { amt, cat -> viewModel.createExpense(amt, cat) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun QueueAndAttendanceView(
+    latestAttendance: AttendanceEntity?,
+    queueItems: List<SyncQueueEntity>,
+    onCheckIn: () -> Unit,
+    onCheckOut: () -> Unit,
+    onRetryItem: (String) -> Unit
+) {
+    Column {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "Shift Status: " + if (latestAttendance == null) "Not Checked In"
+                    else if (latestAttendance.checkOutAt == null) "Checked In (${latestAttendance.syncState})"
+                    else "Checked Out (${latestAttendance.syncState})",
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Button(
+                        onClick = onCheckIn,
+                        modifier = Modifier.weight(1f),
+                        enabled = latestAttendance == null || latestAttendance.checkOutAt != null
+                    ) {
+                        Text("Check-In")
+                    }
+                    Button(
+                        onClick = onCheckOut,
+                        modifier = Modifier.weight(1f),
+                        enabled = latestAttendance != null && latestAttendance.checkOutAt == null
+                    ) {
+                        Text("Check-Out")
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Sync Queue:", style = MaterialTheme.typography.titleSmall)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        if (queueItems.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Queue is empty. Offline mutations appear here.", color = Color.Gray)
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(queueItems, key = { it.operationId }) { item ->
+                    QueueItemRow(item = item, onRetry = { onRetryItem(item.operationId) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TasksView(
+    tasks: List<TaskEntity>,
+    onCreateTask: (String, String?, String) -> Unit
+) {
+    var title by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+
+    Column {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Create Offline Task", style = MaterialTheme.typography.titleSmall)
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Task Title") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("Description") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        if (title.isNotBlank()) {
+                            onCreateTask(title, description.ifBlank { null }, "HIGH")
+                            title = ""
+                            description = ""
+                        }
+                    },
+                    modifier = Modifier.align(Alignment.End),
+                    enabled = title.isNotBlank()
+                ) {
+                    Text("Save Task")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Task List (${tasks.size}):", style = MaterialTheme.typography.titleSmall)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(tasks, key = { it.id }) { task ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(task.title, style = MaterialTheme.typography.titleMedium)
+                            task.description?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                            Text("Status: ${task.status} | Priority: ${task.priority}", style = MaterialTheme.typography.labelSmall)
+                        }
+                        SyncBadge(syncState = task.syncState)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CustomersView(
+    customers: List<CustomerEntity>,
+    onCreateCustomer: (String, String?, String?) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var address by remember { mutableStateOf("") }
+
+    Column {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Create Offline Customer", style = MaterialTheme.typography.titleSmall)
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Customer Name") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = phone,
+                    onValueChange = { phone = it },
+                    label = { Text("Phone") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = address,
+                    onValueChange = { address = it },
+                    label = { Text("Address") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        if (name.isNotBlank()) {
+                            onCreateCustomer(name, phone.ifBlank { null }, address.ifBlank { null })
+                            name = ""
+                            phone = ""
+                            address = ""
+                        }
+                    },
+                    modifier = Modifier.align(Alignment.End),
+                    enabled = name.isNotBlank()
+                ) {
+                    Text("Save Customer")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Customer List (${customers.size}):", style = MaterialTheme.typography.titleSmall)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(customers, key = { it.id }) { customer ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(customer.name, style = MaterialTheme.typography.titleMedium)
+                            customer.phone?.let { Text("Phone: $it", style = MaterialTheme.typography.bodySmall) }
+                            customer.address?.let { Text("Address: $it", style = MaterialTheme.typography.bodySmall) }
+                        }
+                        SyncBadge(syncState = customer.syncState)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun VisitsView(
+    visits: List<VisitEntity>,
+    customers: List<CustomerEntity>,
+    onCheckInVisit: (String) -> Unit,
+    onCompleteVisit: (String, String) -> Unit
+) {
+    Column {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Start Visit for Customer", style = MaterialTheme.typography.titleSmall)
+                Spacer(modifier = Modifier.height(8.dp))
+                if (customers.isEmpty()) {
+                    Text("No customers found. Create a customer first.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { onCheckInVisit(customers.first().id) }) {
+                            Text("Check-In Visit (${customers.first().name})")
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Visit Log (${visits.size}):", style = MaterialTheme.typography.titleSmall)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(visits, key = { it.id }) { visit ->
+                Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            text = "Debug Simulation Controls",
-                            style = MaterialTheme.typography.titleSmall
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Text("Visit: ${visit.status}", style = MaterialTheme.typography.titleMedium)
+                            SyncBadge(syncState = visit.syncState)
+                        }
+                        Text("Customer: ${visit.customerId}", style = MaterialTheme.typography.bodySmall)
+                        visit.meetingOutcome?.let { Text("Outcome: $it", style = MaterialTheme.typography.bodySmall) }
+
+                        if (visit.status != "COMPLETED") {
+                            Spacer(modifier = Modifier.height(8.dp))
                             Button(
-                                onClick = { viewModel.simulateCheckIn() },
-                                modifier = Modifier.weight(1f),
-                                enabled = latestAttendance == null || latestAttendance?.checkOutAt != null
+                                onClick = { onCompleteVisit(visit.id, "Meeting concluded successfully") },
+                                modifier = Modifier.align(Alignment.End)
                             ) {
-                                Text("Check-In")
-                            }
-                            Button(
-                                onClick = { viewModel.simulateCheckOut() },
-                                modifier = Modifier.weight(1f),
-                                enabled = latestAttendance != null && latestAttendance?.checkOutAt == null
-                            ) {
-                                Text("Check-Out")
+                                Text("Complete Visit")
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(16.dp))
+@Composable
+fun ExpensesView(
+    expenses: List<ExpenseEntity>,
+    onCreateExpense: (Double, String) -> Unit
+) {
+    var amountText by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf("TRAVEL") }
 
-            Text("Sync Queue Records:", style = MaterialTheme.typography.titleSmall)
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            if (queueItems.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
+    Column {
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text("Create Offline Expense", style = MaterialTheme.typography.titleSmall)
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = amountText,
+                    onValueChange = { amountText = it },
+                    label = { Text("Amount (INR)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = category,
+                    onValueChange = { category = it },
+                    label = { Text("Category (e.g. TRAVEL, MEALS)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        val amt = amountText.toDoubleOrNull()
+                        if (amt != null && amt > 0) {
+                            onCreateExpense(amt, category)
+                            amountText = ""
+                        }
+                    },
+                    modifier = Modifier.align(Alignment.End),
+                    enabled = amountText.toDoubleOrNull() != null
                 ) {
-                    Text("Queue is empty. Offline mutations will appear here.", color = Color.Gray)
+                    Text("Save Expense")
                 }
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(queueItems, key = { it.operationId }) { item ->
-                        QueueItemRow(
-                            item = item,
-                            onRetry = { viewModel.retryItem(item.operationId) }
-                        )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("Expense Log (${expenses.size}):", style = MaterialTheme.typography.titleSmall)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(expenses, key = { it.id }) { expense ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("INR %.2f".format(expense.amount), style = MaterialTheme.typography.titleMedium)
+                            Text("Category: ${expense.category}", style = MaterialTheme.typography.bodySmall)
+                            Text("Status: ${expense.status}", style = MaterialTheme.typography.labelSmall)
+                        }
+                        SyncBadge(syncState = expense.syncState)
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+fun SyncBadge(syncState: SyncState) {
+    val (bg, label) = when (syncState) {
+        SyncState.SYNCED -> Color(0xFF2E7D32) to "SYNCED"
+        SyncState.PENDING -> Color(0xFFF57C00) to "PENDING"
+        SyncState.AWAITING_SERVER -> Color(0xFF1976D2) to "AWAITING"
+        SyncState.FAILED -> Color(0xFFD32F2F) to "FAILED"
+    }
+    Surface(
+        color = bg,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.padding(4.dp)
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
     }
 }
 
@@ -249,7 +598,12 @@ fun QueueItemRow(item: SyncQueueEntity, onRetry: () -> Unit) {
         QueueStatus.DEAD -> Color(0xFF616161)
     }
 
-    Card(modifier = Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -257,44 +611,46 @@ fun QueueItemRow(item: SyncQueueEntity, onRetry: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "${item.operationType} (${item.entityType})",
-                    style = MaterialTheme.typography.bodyMedium
+                    text = "${item.entityType}: ${item.operationType}",
+                    style = MaterialTheme.typography.titleSmall
                 )
-                Text(
-                    text = item.status.name,
+                Surface(
                     color = statusColor,
-                    style = MaterialTheme.typography.labelMedium
-                )
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        text = item.status.name,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
             }
+
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "OpId: ${item.operationId}",
+                text = "Op: ${item.operationId}",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray
             )
-            if (item.attemptCount > 0) {
+
+            item.lastError?.let { error ->
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Attempts: ${item.attemptCount}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.Red
-                )
-            }
-            if (!item.lastError.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "Error: ${item.lastError}",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = "Error: $error",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error
                 )
             }
-            if (item.status == QueueStatus.FAILED || item.status == QueueStatus.DEAD) {
-                Spacer(modifier = Modifier.height(6.dp))
+
+            if (item.status == QueueStatus.DEAD) {
+                Spacer(modifier = Modifier.height(8.dp))
                 Button(
                     onClick = onRetry,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.align(Alignment.End)
                 ) {
-                    Text("Retry")
+                    Text("Force Retry")
                 }
             }
         }

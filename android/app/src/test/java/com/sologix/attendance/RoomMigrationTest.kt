@@ -5,6 +5,7 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.platform.app.InstrumentationRegistry
 import com.sologix.attendance.data.local.AppDatabase
 import com.sologix.attendance.data.local.MIGRATION_1_2
+import com.sologix.attendance.data.local.MIGRATION_2_3
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -47,5 +48,40 @@ class RoomMigrationTest {
         assertEquals("op-mig-1", cursor.getString(0))
         assertTrue(cursor.isNull(1))
         cursor.close()
+    }
+
+    @Test
+    fun migrate2To3() {
+        // Create database in version 2
+        var db = helper.createDatabase(TEST_DB, 2).apply {
+            execSQL("""
+                INSERT INTO tasks (id, assigned_to, assigned_by, title, description, scheduled_date, priority, status, operation_id, sync_state, updated_at)
+                VALUES ('task-mig-1', 'user-1', 'admin-1', 'Test Task', 'Desc', '2026-10-02', 'HIGH', 'PENDING', 'op-task-1', 'SYNCED', 1000)
+            """)
+            close()
+        }
+
+        // Re-open database with version 3 and provide MIGRATION_2_3
+        db = helper.runMigrationsAndValidate(TEST_DB, 3, true, MIGRATION_2_3)
+
+        // Verify existing task data is preserved
+        val taskCursor = db.query("SELECT id, title FROM tasks WHERE id = 'task-mig-1'")
+        assertTrue(taskCursor.moveToFirst())
+        assertEquals("task-mig-1", taskCursor.getString(0))
+        assertEquals("Test Task", taskCursor.getString(1))
+        taskCursor.close()
+
+        // Verify new expenses table exists and can be written to
+        db.execSQL("""
+            INSERT INTO expenses (id, user_id, amount, category, receipt_photo_path, status, reviewed_by, operation_id, sync_state, created_at)
+            VALUES ('exp-mig-1', 'user-1', 450.50, 'TRAVEL', NULL, 'PENDING', NULL, 'op-exp-1', 'PENDING', 2000)
+        """)
+
+        val expCursor = db.query("SELECT id, amount, category FROM expenses WHERE id = 'exp-mig-1'")
+        assertTrue(expCursor.moveToFirst())
+        assertEquals("exp-mig-1", expCursor.getString(0))
+        assertEquals(450.50, expCursor.getDouble(1), 0.001)
+        assertEquals("TRAVEL", expCursor.getString(2))
+        expCursor.close()
     }
 }

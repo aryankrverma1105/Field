@@ -125,6 +125,7 @@ class SyncWorker @AssistedInject constructor(
             "CUSTOMER" -> db.customerDao().updateSyncState(entityId, state)
             "VISIT" -> db.visitDao().updateSyncState(entityId, state)
             "GPS_POINT" -> db.gpsPointDao().updateSyncState(entityId, state)
+            "EXPENSE" -> db.expenseDao().updateSyncState(entityId, state)
         }
     }
 
@@ -140,6 +141,12 @@ class SyncWorker @AssistedInject constructor(
                 OperationType.CHECK_IN -> apiService.checkIn(requestBody)
                 OperationType.CHECK_OUT -> apiService.checkOut(requestBody)
                 OperationType.GPS_POINT -> apiService.sendGpsPoint(requestBody)
+                OperationType.TASK_CREATE -> apiService.createTask(requestBody)
+                OperationType.CUSTOMER_CREATE -> apiService.createCustomer(requestBody)
+                OperationType.VISIT_CHECK_IN -> apiService.visitCheckIn(requestBody)
+                OperationType.VISIT_COMPLETE -> apiService.visitComplete(requestBody)
+                OperationType.VISIT_UPDATE_NOTES -> apiService.visitNotes(requestBody)
+                OperationType.EXPENSE_CREATE -> apiService.createExpense(requestBody)
                 else -> return DispatchResult.Unsupported("OperationType $operationType has no endpoint yet")
             }
 
