@@ -2,12 +2,14 @@ package com.sologix.attendance.data.repository
 
 import android.content.Context
 import androidx.room.withTransaction
+import com.sologix.attendance.data.hydration.HydrationMergeGuard
 import com.sologix.attendance.data.local.AppDatabase
 import com.sologix.attendance.data.local.entity.AttendanceEntity
 import com.sologix.attendance.data.local.entity.OperationType
 import com.sologix.attendance.data.local.entity.QueueStatus
 import com.sologix.attendance.data.local.entity.SyncQueueEntity
 import com.sologix.attendance.data.local.entity.SyncState
+import com.sologix.attendance.data.remote.ApiService
 import com.sologix.attendance.service.LocationTrackingService
 import com.sologix.attendance.sync.SyncManager
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -24,7 +26,8 @@ import javax.inject.Singleton
 @Singleton
 class AttendanceRepositoryImpl @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val db: AppDatabase
+    private val db: AppDatabase,
+    private val apiService: ApiService
 ) : AttendanceRepository {
 
     private val attendanceDao = db.attendanceDao()
@@ -50,13 +53,22 @@ class AttendanceRepositoryImpl @Inject constructor(
         isMocked: Boolean,
         attendanceId: String?,
         operationId: String?
-    ): AttendanceEntity {
+    ): AttendanceWriteResult {
         val existing = attendanceId?.let { attendanceDao.getById(it) }
 
         // Reuse IDs and operationId on retry if already existing
         val targetAttendanceId = existing?.id ?: attendanceId ?: UUID.randomUUID().toString()
         val targetOpId = existing?.checkInOperationId ?: operationId ?: UUID.randomUUID().toString()
         val now = existing?.checkInAt ?: System.currentTimeMillis()
+
+        // Part A.2: Check if this operation has already reached DEAD status
+        val existingQueueItem = syncQueueDao.getByOperationId(targetOpId)
+        if (existingQueueItem != null && existingQueueItem.status == QueueStatus.DEAD) {
+            return AttendanceWriteResult.BlockedByDeadOperation(
+                reason = existingQueueItem.lastError,
+                operationId = targetOpId
+            )
+        }
 
         val entity = existing?.copy(syncState = SyncState.PENDING) ?: AttendanceEntity(
             id = targetAttendanceId,
@@ -103,7 +115,7 @@ class AttendanceRepositoryImpl @Inject constructor(
         // Trigger immediate background sync
         SyncManager.triggerSync(context)
 
-        return entity
+        return AttendanceWriteResult.Success(entity)
     }
 
     override suspend fun checkOut(
@@ -113,12 +125,22 @@ class AttendanceRepositoryImpl @Inject constructor(
         lng: Double,
         photoPath: String?,
         operationId: String?
-    ): AttendanceEntity? {
-        val existing = attendanceDao.getById(attendanceId) ?: return null
+    ): AttendanceWriteResult {
+        val existing = attendanceDao.getById(attendanceId)
+            ?: return AttendanceWriteResult.NotFound("Attendance record not found for id $attendanceId")
 
         // Reuse existing checkOutOperationId if already generated on a prior attempt
         val targetOpId = existing.checkOutOperationId ?: operationId ?: UUID.randomUUID().toString()
         val now = existing.checkOutAt ?: System.currentTimeMillis()
+
+        // Part A.2: Check if this operation has already reached DEAD status
+        val existingQueueItem = syncQueueDao.getByOperationId(targetOpId)
+        if (existingQueueItem != null && existingQueueItem.status == QueueStatus.DEAD) {
+            return AttendanceWriteResult.BlockedByDeadOperation(
+                reason = existingQueueItem.lastError,
+                operationId = targetOpId
+            )
+        }
 
         val updatedEntity = existing.copy(
             checkOutAt = now,
@@ -159,6 +181,30 @@ class AttendanceRepositoryImpl @Inject constructor(
         // Trigger immediate background sync
         SyncManager.triggerSync(context)
 
-        return updatedEntity
+        return AttendanceWriteResult.Success(updatedEntity)
+    }
+
+    override suspend fun hydrate(since: String?): Result<List<AttendanceEntity>> = runCatching {
+        val response = apiService.getAttendanceHistory(since)
+        if (!response.isSuccessful) {
+            throw IllegalStateException("Failed to hydrate attendance: HTTP ${response.code()}")
+        }
+        val serverDtos = response.body() ?: emptyList()
+        val serverEntities = serverDtos.map { it.toEntity() }
+
+        val localEntities = attendanceDao.getAll()
+        val pendingEntityIds = syncQueueDao.getPendingEntityIds().toSet()
+
+        val merged = HydrationMergeGuard.merge(
+            localEntities = localEntities,
+            serverEntities = serverEntities,
+            unsyncedQueueEntityIds = pendingEntityIds
+        )
+
+        db.withTransaction {
+            attendanceDao.insertAll(merged)
+        }
+
+        merged
     }
 }

@@ -16,7 +16,7 @@ interface AttendanceRepository {
         isMocked: Boolean = false,
         attendanceId: String? = null,
         operationId: String? = null
-    ): AttendanceEntity
+    ): AttendanceWriteResult
 
     suspend fun checkOut(
         attendanceId: String,
@@ -25,5 +25,7 @@ interface AttendanceRepository {
         lng: Double,
         photoPath: String? = null,
         operationId: String? = null
-    ): AttendanceEntity?
+    ): AttendanceWriteResult
+
+    suspend fun hydrate(since: String? = null): Result<List<AttendanceEntity>>
 }

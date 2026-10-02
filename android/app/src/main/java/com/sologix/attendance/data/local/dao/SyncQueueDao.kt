@@ -14,6 +14,9 @@ interface SyncQueueDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: SyncQueueEntity)
 
+    @Query("SELECT * FROM sync_queue WHERE operation_id = :operationId")
+    suspend fun getByOperationId(operationId: String): SyncQueueEntity?
+
     @Query("SELECT * FROM sync_queue WHERE status IN ('PENDING', 'FAILED') ORDER BY created_at ASC LIMIT :limit")
     suspend fun getPendingOrFailed(limit: Int = 50): List<SyncQueueEntity>
 

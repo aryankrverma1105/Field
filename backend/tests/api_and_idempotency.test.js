@@ -16,6 +16,7 @@ describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
   let server;
   let baseUrl;
   let testUserId;
+  let testPhone;
   let validToken;
 
   before(async () => {
@@ -31,11 +32,12 @@ describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
     });
 
     testUserId = crypto.randomUUID();
+    testPhone = `+91${Math.floor(1000000000 + Math.random() * 9000000000)}`;
     // Seed test user in DB
     await pool.execute(
       `INSERT INTO users (id, phone_e164, name, role, status) VALUES (?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE id = id`,
-      [testUserId, '+919999999999', 'Audit Test Employee', 'employee', 'ACTIVE']
+      [testUserId, testPhone, 'Audit Test Employee', 'employee', 'ACTIVE']
     );
 
     // Create valid test JWT signed directly with env.JWT_SECRET
@@ -54,7 +56,9 @@ describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
     if (testUserId) {
       await pool.execute('DELETE FROM gps_points WHERE user_id = ?', [testUserId]);
       await pool.execute('DELETE FROM attendance WHERE user_id = ?', [testUserId]);
+      await pool.execute('DELETE FROM user_sites WHERE user_id = ?', [testUserId]);
       await pool.execute('DELETE FROM users WHERE id = ?', [testUserId]);
+      await pool.execute('DELETE FROM sites WHERE name = ?', ['Audit Test Site']);
     }
     await pool.end();
   });
@@ -421,5 +425,454 @@ describe('Backend Hardening, Idempotency & HTTP API Tests', () => {
     assert.equal(res2.status, 200);
     const body2 = await res2.json();
     assert.equal(body2.alreadyProcessed, true);
+  });
+
+  // --- Part A.1: GET /api/attendance/history ---
+  test('GET /api/attendance/history returns authorized rows ordered by created_at and supports since filter', async () => {
+    const res = await fetch(`${baseUrl}/api/attendance/history`, {
+      headers: {
+        'Authorization': `Bearer ${validToken}`
+      }
+    });
+    assert.equal(res.status, 200);
+    const records = await res.json();
+    assert.ok(Array.isArray(records));
+    assert.ok(records.length > 0, 'Should return records seeded in previous tests for this user');
+
+    // Verify ordering
+    for (let i = 1; i < records.length; i++) {
+      const prev = new Date(records[i - 1].created_at).getTime();
+      const curr = new Date(records[i].created_at).getTime();
+      assert.ok(curr >= prev, 'History must be ordered by created_at ASC');
+    }
+
+    // Verify ?since filter excludes earlier items
+    const futureSince = '2099-01-01T00:00:00.000Z';
+    const resFiltered = await fetch(`${baseUrl}/api/attendance/history?since=${futureSince}`, {
+      headers: {
+        'Authorization': `Bearer ${validToken}`
+      }
+    });
+    assert.equal(resFiltered.status, 200);
+    const filteredRecords = await resFiltered.json();
+    assert.equal(filteredRecords.length, 0, 'Future since filter should return 0 records');
+  });
+
+  // --- Part B.2: Server Geofencing evaluation ---
+  test('Check-in computes geofenceStatus INSIDE when inside assigned site radius', async () => {
+    const siteId = crypto.randomUUID();
+    const siteLat = 12.9716;
+    const siteLng = 77.5946;
+    const siteRadius = 250.0;
+
+    await pool.execute(
+      'INSERT INTO sites (id, name, lat, lng, geofence_radius_m) VALUES (?, ?, ?, ?, ?)',
+      [siteId, 'Audit Test Site', siteLat, siteLng, siteRadius]
+    );
+    await pool.execute(
+      'INSERT INTO user_sites (user_id, site_id) VALUES (?, ?)',
+      [testUserId, siteId]
+    );
+
+    const sessionId = crypto.randomUUID();
+    const op = `op-${crypto.randomUUID()}`;
+
+    // Inside site (distance ~15 meters)
+    const res = await fetch(`${baseUrl}/api/attendance/check-in`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}`
+      },
+      body: JSON.stringify({
+        id: sessionId,
+        operationId: op,
+        lat: 12.9717,
+        lng: 77.5947
+      })
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.record.geofence_status, 'INSIDE', 'Must compute INSIDE when within site radius');
+
+    // Clean up user site mapping
+    await pool.execute('DELETE FROM user_sites WHERE user_id = ? AND site_id = ?', [testUserId, siteId]);
+    await pool.execute('DELETE FROM sites WHERE id = ?', [siteId]);
+  });
+
+  test('Check-in computes geofenceStatus OUTSIDE when outside assigned site radius, overriding client spoofing', async () => {
+    const siteId = crypto.randomUUID();
+    const siteLat = 12.9716;
+    const siteLng = 77.5946;
+    const siteRadius = 100.0;
+
+    await pool.execute(
+      'INSERT INTO sites (id, name, lat, lng, geofence_radius_m) VALUES (?, ?, ?, ?, ?)',
+      [siteId, 'Audit Test Site', siteLat, siteLng, siteRadius]
+    );
+    await pool.execute(
+      'INSERT INTO user_sites (user_id, site_id) VALUES (?, ?)',
+      [testUserId, siteId]
+    );
+
+    const sessionId = crypto.randomUUID();
+    const op = `op-${crypto.randomUUID()}`;
+
+    // Outside site (~350 km away), client attempts to spoof 'INSIDE'
+    const res = await fetch(`${baseUrl}/api/attendance/check-in`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}`
+      },
+      body: JSON.stringify({
+        id: sessionId,
+        operationId: op,
+        lat: 13.0827,
+        lng: 80.2707,
+        geofenceStatus: 'INSIDE' // Client spoof attempt
+      })
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.record.geofence_status, 'OUTSIDE', 'Must compute OUTSIDE server-side regardless of client body');
+
+    // Clean up
+    await pool.execute('DELETE FROM user_sites WHERE user_id = ? AND site_id = ?', [testUserId, siteId]);
+    await pool.execute('DELETE FROM sites WHERE id = ?', [siteId]);
+  });
+
+  test('Check-in computes geofenceStatus UNKNOWN for user with no assigned site', async () => {
+    const sessionId = crypto.randomUUID();
+    const op = `op-${crypto.randomUUID()}`;
+
+    // User has no assigned site in user_sites table
+    const res = await fetch(`${baseUrl}/api/attendance/check-in`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}`
+      },
+      body: JSON.stringify({
+        id: sessionId,
+        operationId: op,
+        lat: 12.9716,
+        lng: 77.5946
+      })
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.record.geofence_status, 'UNKNOWN', 'Must store UNKNOWN if user has no assigned site');
+  });
+
+  // --- Part B.1: Firebase Phone Auth exchange -> App JWT ---
+  test('POST /api/auth/login with valid Firebase token issues application JWT for active user', async () => {
+    // testUserId was seeded with phone testPhone
+    const res = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idToken: `test-fb-token:fb_uid_${testUserId}:${testPhone}`
+      })
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.token, 'Must return signed app JWT');
+    assert.equal(body.user.id, testUserId);
+    assert.equal(body.user.role, 'employee');
+
+    // Verify the returned token is valid against JWT_SECRET
+    const decoded = jwt.verify(body.token, env.JWT_SECRET);
+    assert.equal(decoded.userId, testUserId);
+    assert.equal(decoded.role, 'employee');
+  });
+
+  test('POST /api/auth/login with invalid or expired Firebase token returns 401', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idToken: 'test-fb-token:expired:invalid'
+      })
+    });
+    assert.equal(res.status, 401);
+    const body = await res.json();
+    assert.match(body.error, /expired|invalid/i);
+  });
+
+  test('POST /api/auth/login with valid token but inactive user returns 403', async () => {
+    const inactiveUserId = crypto.randomUUID();
+    const inactivePhone = '+918888888888';
+    await pool.execute(
+      `INSERT INTO users (id, phone_e164, name, role, status) VALUES (?, ?, ?, ?, ?)`,
+      [inactiveUserId, inactivePhone, 'Inactive Employee', 'employee', 'INACTIVE']
+    );
+
+    const res = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idToken: `test-fb-token:fb_${inactiveUserId}:${inactivePhone}`
+      })
+    });
+    assert.equal(res.status, 403);
+    const body = await res.json();
+    assert.match(body.error, /not provisioned or inactive/i);
+
+    // Clean up
+    await pool.execute('DELETE FROM users WHERE id = ?', [inactiveUserId]);
+  });
+
+  test('POST /api/auth/login with unknown Firebase UID returns 403 and never creates an account implicitly', async () => {
+    const unknownUid = `unknown_uid_${crypto.randomUUID()}`;
+    const unknownPhone = '+917777777777';
+
+    const res = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idToken: `test-fb-token:${unknownUid}:${unknownPhone}`
+      })
+    });
+    assert.equal(res.status, 403);
+    const body = await res.json();
+    assert.match(body.error, /not provisioned or inactive/i);
+
+    // Assert that NO user row was created for unknownUid
+    const [rows] = await pool.execute('SELECT * FROM users WHERE firebase_uid = ? OR phone_e164 = ?', [unknownUid, unknownPhone]);
+    assert.equal(rows.length, 0, 'Must NOT create an account implicitly on login failure');
+  });
+
+  // --- Part B.3: Specific Domain Rules & Role Protections ---
+
+  test('Visits: checkIn sets IN_PROGRESS, updateNotes NEVER touches status/checkout, complete is terminal', async () => {
+    const visitId = crypto.randomUUID();
+    const customerId = crypto.randomUUID();
+    const checkInOp = `op-visit-in-${crypto.randomUUID()}`;
+    const completeOp = `op-visit-out-${crypto.randomUUID()}`;
+
+    // 1. Check in to visit
+    const checkInRes = await fetch(`${baseUrl}/api/visits/check-in`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}`
+      },
+      body: JSON.stringify({
+        id: visitId,
+        customerId,
+        operationId: checkInOp
+      })
+    });
+    assert.equal(checkInRes.status, 200);
+    const checkInBody = await checkInRes.json();
+    assert.equal(checkInBody.record.status, 'IN_PROGRESS');
+    assert.equal(checkInBody.record.check_out_at, null);
+
+    // 2. Mid-visit notes save - must NEVER complete visit or modify check_out_at
+    const notesRes = await fetch(`${baseUrl}/api/visits/notes`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}`
+      },
+      body: JSON.stringify({
+        id: visitId,
+        notes: 'Mid-visit client discussion about contract renewal',
+        meetingOutcome: 'Client requested revised quote'
+      })
+    });
+    assert.equal(notesRes.status, 200);
+    const notesBody = await notesRes.json();
+    assert.equal(notesBody.record.notes, 'Mid-visit client discussion about contract renewal');
+    assert.equal(notesBody.record.status, 'IN_PROGRESS', 'Notes update must NEVER alter status');
+    assert.equal(notesBody.record.check_out_at, null, 'Notes update must NEVER set check_out_at');
+
+    // 3. Complete visit (terminal action)
+    const completeRes = await fetch(`${baseUrl}/api/visits/complete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}`
+      },
+      body: JSON.stringify({
+        id: visitId,
+        operationId: completeOp,
+        meetingOutcome: 'Final signed contract collected'
+      })
+    });
+    assert.equal(completeRes.status, 200);
+    const completeBody = await completeRes.json();
+    assert.equal(completeBody.record.status, 'COMPLETED');
+    assert.ok(completeBody.record.check_out_at, 'Must set check_out_at on completion');
+
+    // Clean up
+    await pool.execute('DELETE FROM visits WHERE id = ?', [visitId]);
+  });
+
+  test('Expenses: employee cannot review expenses (403), manager can review (200)', async () => {
+    const expenseId = crypto.randomUUID();
+    const op = `op-exp-${crypto.randomUUID()}`;
+
+    // 1. Employee creates expense
+    const createRes = await fetch(`${baseUrl}/api/expenses`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}` // role: employee
+      },
+      body: JSON.stringify({
+        id: expenseId,
+        amount: 250.50,
+        category: 'Travel / Fuel',
+        operationId: op
+      })
+    });
+    assert.equal(createRes.status, 200);
+
+    // 2. Employee tries to approve own expense -> 403 Forbidden
+    const empReviewRes = await fetch(`${baseUrl}/api/expenses/review`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}` // role: employee
+      },
+      body: JSON.stringify({
+        id: expenseId,
+        status: 'APPROVED'
+      })
+    });
+    assert.equal(empReviewRes.status, 403);
+    const empReviewBody = await empReviewRes.json();
+    assert.match(empReviewBody.error, /Only managers and admins/i);
+
+    // 3. Manager reviews expense -> 200 OK
+    const managerToken = jwt.sign(
+      { userId: testUserId, role: 'manager' },
+      env.JWT_SECRET,
+      { algorithm: 'HS256', expiresIn: '1h' }
+    );
+    const mgrReviewRes = await fetch(`${baseUrl}/api/expenses/review`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${managerToken}`
+      },
+      body: JSON.stringify({
+        id: expenseId,
+        status: 'APPROVED'
+      })
+    });
+    assert.equal(mgrReviewRes.status, 200);
+    const mgrReviewBody = await mgrReviewRes.json();
+    assert.equal(mgrReviewBody.record.status, 'APPROVED');
+
+    // Clean up
+    await pool.execute('DELETE FROM expenses WHERE id = ?', [expenseId]);
+  });
+
+  test('Wages: employee cannot update wage (403), admin updates wage server-side (200)', async () => {
+    const targetUserId = crypto.randomUUID();
+    await pool.execute(
+      `INSERT INTO users (id, phone_e164, name, role, daily_wage, status) VALUES (?, '+916666666666', 'Wage Test User', 'employee', 500.00, 'ACTIVE')`,
+      [targetUserId]
+    );
+
+    // 1. Employee tries to modify wage -> 403 Forbidden
+    const empWageRes = await fetch(`${baseUrl}/api/workforce/wage`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${validToken}` // role: employee
+      },
+      body: JSON.stringify({
+        targetUserId,
+        newWage: 1200.00
+      })
+    });
+    assert.equal(empWageRes.status, 403);
+    const empWageBody = await empWageRes.json();
+    assert.match(empWageBody.error, /Only administrators/i);
+
+    // 2. Admin updates wage -> 200 OK
+    const adminToken = jwt.sign(
+      { userId: testUserId, role: 'admin' },
+      env.JWT_SECRET,
+      { algorithm: 'HS256', expiresIn: '1h' }
+    );
+    const adminWageRes = await fetch(`${baseUrl}/api/workforce/wage`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({
+        targetUserId,
+        newWage: 1200.00
+      })
+    });
+    assert.equal(adminWageRes.status, 200);
+    const adminWageBody = await adminWageRes.json();
+    assert.equal(Number(adminWageBody.user.daily_wage), 1200.00);
+
+    // Verify in DB directly
+    const [rows] = await pool.execute('SELECT daily_wage FROM users WHERE id = ?', [targetUserId]);
+    assert.equal(Number(rows[0].daily_wage), 1200.00);
+
+    // Clean up
+    await pool.execute('DELETE FROM users WHERE id = ?', [targetUserId]);
+  });
+
+  test('Tasks and Customers: creation and history listing endpoints return 200', async () => {
+    const taskId = crypto.randomUUID();
+    const taskOp = `op-task-${crypto.randomUUID()}`;
+    const custId = crypto.randomUUID();
+    const custOp = `op-cust-${crypto.randomUUID()}`;
+
+    // Create task
+    const taskRes = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${validToken}` },
+      body: JSON.stringify({
+        id: taskId,
+        assignedTo: testUserId,
+        title: 'Audit Inspection Task',
+        operationId: taskOp
+      })
+    });
+    assert.equal(taskRes.status, 200);
+
+    // List tasks
+    const taskListRes = await fetch(`${baseUrl}/api/tasks/history`, {
+      headers: { 'Authorization': `Bearer ${validToken}` }
+    });
+    assert.equal(taskListRes.status, 200);
+    const tasks = await taskListRes.json();
+    assert.ok(tasks.some(t => t.id === taskId));
+
+    // Create customer
+    const custRes = await fetch(`${baseUrl}/api/customers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${validToken}` },
+      body: JSON.stringify({
+        id: custId,
+        name: 'Acme Global Corp',
+        phone: '+919876543210',
+        operationId: custOp
+      })
+    });
+    assert.equal(custRes.status, 200);
+
+    // List customers
+    const custListRes = await fetch(`${baseUrl}/api/customers/history`, {
+      headers: { 'Authorization': `Bearer ${validToken}` }
+    });
+    assert.equal(custListRes.status, 200);
+    const customers = await custListRes.json();
+    assert.ok(customers.some(c => c.id === custId));
+
+    // Clean up
+    await pool.execute('DELETE FROM tasks WHERE id = ?', [taskId]);
+    await pool.execute('DELETE FROM customers WHERE id = ?', [custId]);
   });
 });

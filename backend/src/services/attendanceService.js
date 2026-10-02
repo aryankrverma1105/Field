@@ -8,10 +8,23 @@ function formatUtcDatetime3(dateInput) {
   return d.toISOString().slice(0, 23).replace('T', ' ');
 }
 
+function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000; // meters
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 class AttendanceService {
   /**
    * Idempotent Check-in
-   * - Ignores client-supplied geofenceStatus (always 'UNKNOWN' until Phase 2 server geofencing)
+   * - Computes geofenceStatus server-side: 'INSIDE' if within assigned site radius, 'OUTSIDE' if outside, 'UNKNOWN' if no site assigned
+   * - Never trusts client-supplied geofenceStatus
    * - Detects PK collision (same id with different operationId -> 409 with existing record, never undefined)
    * - Idempotent retry (same operationId -> 200 with existing record)
    */
@@ -62,12 +75,36 @@ class AttendanceService {
       return { success: true, alreadyProcessed: true, record: existingByOp[0] };
     }
 
-    // 3. Insert record. geofence_status is strictly 'UNKNOWN'
+    // 3. Compute geofence status server-side from user_sites
+    let computedGeofenceStatus = 'UNKNOWN';
+    if (lat !== undefined && lng !== undefined && lat !== null && lng !== null) {
+      const [assignedSites] = await pool.execute(
+        `SELECT s.id, s.lat, s.lng, s.geofence_radius_m
+         FROM user_sites us
+         JOIN sites s ON us.site_id = s.id
+         WHERE us.user_id = ?`,
+        [userId]
+      );
+
+      if (assignedSites.length > 0) {
+        let insideAny = false;
+        for (const site of assignedSites) {
+          const dist = haversineDistanceMeters(Number(lat), Number(lng), Number(site.lat), Number(site.lng));
+          if (dist <= Number(site.geofence_radius_m)) {
+            insideAny = true;
+            break;
+          }
+        }
+        computedGeofenceStatus = insideAny ? 'INSIDE' : 'OUTSIDE';
+      }
+    }
+
+    // 4. Insert record with computed geofence status (never client-supplied)
     const query = `
       INSERT INTO attendance (
         id, user_id, check_in_at, check_in_lat, check_in_lng,
         check_in_photo_path, check_in_is_mocked, check_in_operation_id, geofence_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'UNKNOWN');
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
     `;
 
     try {
@@ -79,7 +116,8 @@ class AttendanceService {
         lng !== undefined ? lng : null,
         photoPath,
         Boolean(isMocked),
-        operationId
+        operationId,
+        computedGeofenceStatus
       ]);
     } catch (dbErr) {
       if (dbErr.code === 'ER_DUP_ENTRY') {
@@ -259,6 +297,31 @@ class AttendanceService {
 
     const [rows] = await pool.execute('SELECT * FROM gps_points WHERE id = ?', [id]);
     return { success: true, alreadyProcessed: false, record: rows[0] };
+  }
+
+  /**
+   * Fetch attendance history for the requesting user ordered by created_at ASC.
+   * Supports optional `since` ISO8601 query parameter for incremental hydration.
+   */
+  async getHistory({ userId, since = null }) {
+    if (!userId) {
+      const err = new Error('userId is required');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    let query = 'SELECT * FROM attendance WHERE user_id = ?';
+    const params = [userId];
+
+    if (since) {
+      query += ' AND created_at >= ?';
+      params.push(formatUtcDatetime3(since));
+    }
+
+    query += ' ORDER BY created_at ASC';
+
+    const [rows] = await pool.execute(query, params);
+    return rows;
   }
 }
 

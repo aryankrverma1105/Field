@@ -4,7 +4,9 @@ import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.GET
 import retrofit2.http.POST
+import retrofit2.http.Query
 
 interface ApiService {
     @POST("api/attendance/check-in")
@@ -15,4 +17,10 @@ interface ApiService {
 
     @POST("api/gps-points")
     suspend fun sendGpsPoint(@Body body: RequestBody): Response<ResponseBody>
+
+    @GET("api/attendance/history")
+    suspend fun getAttendanceHistory(@Query("since") since: String? = null): Response<List<AttendanceHistoryDto>>
+
+    @POST("api/auth/login")
+    suspend fun login(@Body request: LoginRequest): Response<LoginResponse>
 }

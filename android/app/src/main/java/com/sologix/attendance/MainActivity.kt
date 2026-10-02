@@ -88,6 +88,8 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
     val queueItems by viewModel.queueItems.collectAsState()
     val pendingCount by viewModel.pendingCount.collectAsState()
     val latestAttendance by viewModel.latestAttendance.collectAsState()
+    val isRefreshing by viewModel.isRefreshing.collectAsState()
+    val uiError by viewModel.uiError.collectAsState()
 
     Scaffold(
         topBar = {
@@ -128,8 +130,49 @@ fun SyncStatusScreen(viewModel: SyncViewModel = viewModel()) {
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    Button(onClick = { viewModel.triggerManualRetry() }) {
-                        Text("Sync Now")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { viewModel.refreshHydration() },
+                            enabled = !isRefreshing
+                        ) {
+                            if (isRefreshing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text("Hydrate")
+                            }
+                        }
+                        Button(onClick = { viewModel.triggerManualRetry() }) {
+                            Text("Sync Now")
+                        }
+                    }
+                }
+            }
+
+            uiError?.let { error ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { viewModel.clearError() }) {
+                            Text("Dismiss")
+                        }
                     }
                 }
             }

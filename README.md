@@ -39,21 +39,37 @@ A production-grade attendance and field-workforce management system built with *
 | :--- | :--- | :--- |
 | **Split Idempotency Keys** (Check-In & Check-Out) | **Implemented and tested** | Split operation IDs on MySQL schema (`check_in_operation_id`, `check_out_operation_id`) and Room entities. Verified via real DB HTTP tests and Room unit tests. |
 | **Backend Express Server & JWT Middleware** | **Implemented and tested** | `src/server.js` running with HS256 JWT enforcement, 401 on missing/expired/`alg:none`, real HTTP endpoints. Verified via `node --test`. |
-| **Backend DB Security & Startup Env Validation** | **Implemented and tested** | Hardcoded passwords completely removed. Process exits with code 1 if required env vars are missing or JWT secret < 32 chars. |
+| **Backend DB Security & Startup Env Validation** | **Implemented and tested** | Hardcoded passwords completely removed. Process exits with code 1 if required env vars (`DATABASE_USER, DATABASE_PASSWORD, DATABASE_NAME, JWT_SECRET`) are missing or `JWT_SECRET` < 32 chars. `DATABASE_HOST` defaults to `127.0.0.1`. |
 | **Stale Row Protection on Check-Out** | **Implemented and tested** | Targeted SQL `WHERE id=? AND user_id=? AND check_in_at IS NOT NULL AND check_out_operation_id IS NULL`. Prevents closing 2-day-old sessions. |
 | **Primary-Key Collision Protection on Check-In** | **Implemented and tested** | Returns HTTP 409 with existing record instead of `undefined` on PK conflict. |
-| **Server-Controlled Geofence Status** | **Implemented and tested** | Client geofence input is ignored; server stores `'UNKNOWN'` until Phase 2 site computation. |
+| **Server-Controlled Geofence Status** | **Implemented and tested** | Client geofence input is ignored; server computes Haversine distance against user's assigned sites in `user_sites`/`sites` (`INSIDE` / `OUTSIDE` / `UNKNOWN`). |
 | **Hilt DI & Retrofit Network Pipeline** | **Implemented and tested** | `TokenStore` (`EncryptedSharedPreferences`), `AuthInterceptor`, `OkHttpClient`, `Retrofit`, and `ApiService`. Tested with `MockWebServer`. |
 | **Atomic Claim in SyncWorker** | **Implemented and tested** | Atomic `UPDATE sync_queue SET status='IN_PROGRESS' WHERE operation_id=? AND status IN ('PENDING','FAILED')` prevents dual-worker dispatch races. |
-| **Dead-Letter Queue & Status Classification** | **Implemented and tested** | `QueueStatus.DEAD` with `last_error` column. 400/404/409 or 5 consecutive failures transition to DEAD. Manual retry in Compose UI resets to PENDING. |
+| **Dead-Letter Queue & Status Classification** | **Implemented and tested** | `QueueStatus.DEAD` with `last_error` column. 400/404/409 or 5 consecutive failures transition to DEAD. Repository blocks reviving DEAD items with `AttendanceWriteResult.BlockedByDeadOperation` unless manually retried. |
 | **Per-Entity Dispatch Ordering** | **Implemented and tested** | Check-out operations wait until prior operations for the same `entity_id` are SYNCED. Entity failure halts subsequent operations for that entity while allowing other entities to proceed. |
 | **Room Schema Export & Migration (1 → 2)** | **Implemented and tested** | `fallbackToDestructiveMigration()` removed. `exportSchema = true` with committed schema JSONs and real `Migration(1, 2)`. |
-| **Kotlin Hydration Merge Guard** | **Implemented and tested** | Shared `SyncableEntity` interface across attendance, tasks, customers, and visits. Protects un-synced/queued rows, refreshes clean SYNCED rows, inserts server-only, preserves local-only. |
-| **Foreground Shift Tracking Service (Option A)** | **Implemented and tested** | Foreground Service (`foregroundServiceType="location"`) with runtime permission flow, persistent notification, `START_STICKY` session persistence, and `SecurityException` catch. |
+| **Kotlin Hydration Merge Guard & Data Flow** | **Implemented and tested** | `HydrationMergeGuard.merge` wired into `AttendanceRepository.hydrate()` calling `GET /api/attendance/history`. Called on app start and manual UI trigger. Verified with Robolectric tests. |
+| **Foreground Shift Tracking Service (Option A)** | **Implemented and tested** | Foreground Service (`foregroundServiceType="location"`) with runtime permission flow, persistent notification, `START_STICKY` restart handling, and atomic `LocationTrackingSessionStore` (`SharedPreferences` accepted for synchronous non-blocking access in `onStartCommand()`). |
 | **Mock Location Detector** | **Implemented and tested** | Hardware mock detection with API-level branching tested in `MockLocationDetectorTest`. |
-| **Firebase Phone Auth Flow & UI** | **Not started** | Phase 2 scope. Backend tests sign tokens directly with `JWT_SECRET`. |
+| **Firebase Phone Auth Flow & UI** | **In progress** | Backend JWT issuance & authentication pipeline. |
 | **CameraX Selfie Capture UI** | **Not started** | Phase 2 scope. |
-| **Server-Side Geofence Polygon Evaluation** | **Not started** | Phase 2 scope. |
+| **Server-Side Geofence Polygon Evaluation** | **Implemented and tested** | Multi-site Haversine distance evaluation in `attendanceService.js`. |
+
+---
+
+## Security & Environment Configuration
+
+### Required Environment Variables (Backend)
+The backend service enforces presence and validity of the following variables in `src/config/env.js` on startup:
+- `DATABASE_USER`: MySQL database username.
+- `DATABASE_PASSWORD`: MySQL database user password.
+- `DATABASE_NAME`: Target database name.
+- `JWT_SECRET`: Signing key for application JSON Web Tokens (must be $\ge$ 32 characters).
+
+The server defaults `DATABASE_HOST` to `127.0.0.1`, `DATABASE_PORT` to `3306`, and `PORT` to `3000`. If any of the four required variables are missing or empty, or if `JWT_SECRET` is less than 32 characters, the application terminates immediately with exit code 1.
+
+### Storage Architecture Decision: `LocationTrackingSessionStore`
+`LocationTrackingSessionStore` utilizes Android `SharedPreferences` instead of Jetpack DataStore. This architectural choice is intentional and accepted: `LocationTrackingService` runs as a high-reliability foreground service that is restarted with `START_STICKY` (null intent) upon process termination. `onStartCommand()` requires immediate, synchronous, zero-latency access to the active session state without dispatching coroutines or invoking `runBlocking` on the main application thread.
 
 ---
 
